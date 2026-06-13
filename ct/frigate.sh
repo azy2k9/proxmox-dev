@@ -35,6 +35,11 @@ function update_script() {
 
 start
 build_container
+
+# Attempt to add zfs cctv pool
+pct set $CTID -mp0 cctv:6000,mp=/media/frigate
+echo "mp0: cctv:subvol-${CTID}-disk-0,mp=/media/frigate,size=6000G" >> /etc/pve/lxc/${CTID}.conf    
+
 description
 
 msg_ok "Completed successfully!\n"
