@@ -36,13 +36,23 @@ function update_script() {
 start
 build_container
 
-# After build_container, before pct set
-if zpool list | grep -q "^cctv"; then
-    pct set $CTID -mp0 cctv:6000,mp=/media/frigate
-    echo "mp0: cctv:subvol-${CTID}-disk-0,mp=/media/frigate,size=6000G" >> /etc/pve/lxc/${CTID}.conf
-    msg_ok "Mounted ZFS pool 'cctv' to /media/frigate"
+
+# ============================================================================
+# Optional: Mount storage for Frigate recordings
+# ============================================================================
+
+STORAGE_NAME="cctv"
+MOUNT_SIZE="6000"  # This is in GB for pct set
+MOUNT_POINT="/media/frigate"
+
+if pvesm status | awk 'NR>1 {print $1}' | grep -qx "$STORAGE_NAME"; then
+    msg_info "Mounting Proxmox storage '$STORAGE_NAME' to $MOUNT_POINT"
+    pct set "$CTID" -mp0 "${STORAGE_NAME}:${MOUNT_SIZE},mp=${MOUNT_POINT}"
+    # echo "mp0: cctv:subvol-${CTID}-disk-0,mp=/media/frigate,size=6000G" >> /etc/pve/lxc/${CTID}.conf
+    msg_ok "Mounted storage '$STORAGE_NAME' to $MOUNT_POINT"
 else
-    msg_warn "ZFS pool 'cctv' not found. Skipping mount point. Add storage manually via Proxmox UI."
+    msg_warn "Proxmox storage '$STORAGE_NAME' not found. Skipping mount point."
+    msg_info "To add storage: zpool create cctv /dev/sdX && pvesm add zfspool cctv -pool cctv"
 fi
 
 description
