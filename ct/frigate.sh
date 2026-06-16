@@ -8,7 +8,7 @@ source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxV
 APP="Frigate"
 var_tags="${var_tags:-nvr}"
 var_cpu="${var_cpu:-8}"
-var_ram="${var_ram:-4096}"
+var_ram="${var_ram:-16384}"
 var_disk="${var_disk:-20}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-12}"
@@ -36,6 +36,17 @@ function update_script() {
 start
 build_container
 
+# ============================================================================
+# Increase /dev/shm for nginx vod cache and Frigate logs
+# ============================================================================
+LXC_CONFIG="/etc/pve/lxc/${CTID}.conf"
+if ! grep -q 'dev/shm.*tmpfs' "$LXC_CONFIG"; then
+    msg_info "Increasing /dev/shm to 2GB for Frigate/nginx caches"
+    cat <<EOF >>"$LXC_CONFIG"
+lxc.mount.entry: tmpfs dev/shm tmpfs defaults,size=2048m,create=dir,mode=1777 0 0
+EOF
+    msg_ok "Configured 2GB /dev/shm mount"
+fi
 
 # ============================================================================
 # Optional: Mount storage for Frigate recordings
@@ -59,5 +70,6 @@ description
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW}Access it using the following URL:${CL}"
-echo -e "${GATEWAY}${BGN}http://${IP}:5000${CL}"
+echo -e "${INFO}${YW}Access the authenticated UI at:${CL}"
+echo -e "${GATEWAY}${BGN}http://${IP}:8971${CL}"
+echo -e "${INFO}${YW}Port 5000 is for internal/unauthenticated access only.${CL}"
