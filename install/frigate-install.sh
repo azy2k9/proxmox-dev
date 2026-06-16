@@ -220,18 +220,18 @@ else
   msg_warn "OpenVino build failed (CPU may not support required instructions). Frigate will use CPU model."
 fi
 
-# msg_info "Installing HailoRT Runtime"
-# $STD bash /opt/frigate/docker/main/install_hailort.sh
-# cp -a /opt/frigate/docker/main/rootfs/. /
-# sed -i '/^.*unset DEBIAN_FRONTEND.*$/d' /opt/frigate/docker/main/install_deps.sh
-# echo "libedgetpu1-max libedgetpu/accepted-eula boolean true" | debconf-set-selections
-# echo "libedgetpu1-max libedgetpu/install-confirm-max boolean true" | debconf-set-selections
-# echo 'force-overwrite' >/etc/dpkg/dpkg.cfg.d/force-overwrite
-# $STD bash /opt/frigate/docker/main/install_deps.sh
-# rm -f /etc/dpkg/dpkg.cfg.d/force-overwrite
-# $STD pip3 install -U /wheels/*.whl
-# ldconfig
-# msg_ok "Installed HailoRT Runtime"
+msg_info "Installing HailoRT Runtime"
+$STD bash /opt/frigate/docker/main/install_hailort.sh
+cp -a /opt/frigate/docker/main/rootfs/. /
+sed -i '/^.*unset DEBIAN_FRONTEND.*$/d' /opt/frigate/docker/main/install_deps.sh
+echo "libedgetpu1-max libedgetpu/accepted-eula boolean true" | debconf-set-selections
+echo "libedgetpu1-max libedgetpu/install-confirm-max boolean true" | debconf-set-selections
+echo 'force-overwrite' >/etc/dpkg/dpkg.cfg.d/force-overwrite
+$STD bash /opt/frigate/docker/main/install_deps.sh
+rm -f /etc/dpkg/dpkg.cfg.d/force-overwrite
+$STD pip3 install -U /wheels/*.whl
+ldconfig
+msg_ok "Installed HailoRT Runtime"
 
 msg_info "Installing MemryX Runtime"
 $STD bash /opt/frigate/docker/main/install_memryx.sh
@@ -260,142 +260,45 @@ msg_ok "Built Frigate Application"
 
 
 # ============================================================================
-# CRITICAL FIX: Generate Nginx config files from templates
-# ============================================================================
-# The Docker rootfs copy above brings in templates, but tempio needs to 
-# process them. In Docker, s6-overlay handles this at runtime. In LXC,
-# we must do it at install time or the nginx includes will be missing/empty.
+# Generate runtime Nginx includes from templates (listen/base_path)
+# Rootfs copy above provides nginx.conf, auth, and proxy configs.
 # ============================================================================
 
 msg_info "Generating Nginx configuration files from templates"
 
-# Create config directories
-mkdir -p /usr/local/nginx/conf
-mkdir -p /usr/local/nginx/templates
+mkdir -p /usr/local/nginx/conf /usr/local/nginx/templates
 
-# Ensure templates are in place (they should be from rootfs copy, but verify)
 if [[ ! -f /usr/local/nginx/templates/listen.gotmpl ]]; then
- cp /opt/frigate/docker/main/rootfs/usr/local/nginx/templates/*.gotmpl /usr/local/nginx/templates/ 2>/dev/null || true
+  cp /opt/frigate/docker/main/rootfs/usr/local/nginx/templates/*.gotmpl /usr/local/nginx/templates/ 2>/dev/null || true
 fi
 
-# Build listen.conf from template using Frigate's config
-# This reads tls.enabled and ipv6 settings from /config/config.yml
-python3 /opt/frigate/docker/main/rootfs/usr/local/nginx/get_listen_settings.py 2>/dev/null | \
- tempio -template /usr/local/nginx/templates/listen.gotmpl \
- -out /usr/local/nginx/conf/listen.conf 2>/dev/null || \
- cat > /usr/local/nginx/conf/listen.conf << 'NGINX_LISTEN'
+python3 /usr/local/nginx/get_listen_settings.py 2>/dev/null | \
+  tempio -template /usr/local/nginx/templates/listen.gotmpl \
+  -out /usr/local/nginx/conf/listen.conf 2>/dev/null || \
+  cat > /usr/local/nginx/conf/listen.conf << 'NGINX_LISTEN'
 # Internal (IPv4 always; IPv6 optional)
 listen 5000;
 
 # intended for external traffic, protected by auth
-# Default to HTTP (no TLS) for LXC internal use
 listen 8971;
 NGINX_LISTEN
 
-# Build base_path.conf from template
-python3 /opt/frigate/docker/main/rootfs/usr/local/nginx/get_base_path.py 2>/dev/null | \
- tempio -template /usr/local/nginx/templates/base_path.gotmpl \
- -out /usr/local/nginx/conf/base_path.conf 2>/dev/null || \
- echo "" > /usr/local/nginx/conf/base_path.conf
+python3 /usr/local/nginx/get_base_path.py 2>/dev/null | \
+  tempio -template /usr/local/nginx/templates/base_path.gotmpl \
+  -out /usr/local/nginx/conf/base_path.conf 2>/dev/null || \
+  echo "" > /usr/local/nginx/conf/base_path.conf
 
-# ============================================================================
-# FIX 1: Create auth_location.conf that works with Frigate 0.17.1
-# ============================================================================
-# The original template proxies auth to /auth on port 5001, but Frigate 0.17.1
-# does NOT have a /auth endpoint. Instead, auth is handled internally by the
-# FastAPI app at /api/login. 
-#
-# For LXC/internal use, we disable the external auth proxy pattern and instead
-# rely on Frigate's built-in auth (when enabled) or allow unauthenticated 
-# access (when auth.enabled: false).
-#
-# The correct approach for 0.17.1: Nginx should NOT do auth_request 
-# subrequests. Instead, it should pass all requests directly to Frigate's
-# API, which handles auth itself via session cookies/JWT.
-# ============================================================================
-
-cat > /usr/local/nginx/conf/auth_location.conf << 'AUTH_LOC'
-# Frigate 0.17.1 handles authentication internally via FastAPI.
-# The old /auth endpoint no longer exists. Nginx should not attempt
-# to validate auth via subrequests. Instead, requests are passed
-# directly to Frigate which returns 401/403 as appropriate.
-#
-# This location block is kept for compatibility but does nothing.
-# If you need external proxy auth (Authelia/Authentik), configure
-# that in your external reverse proxy, not here.
-AUTH_LOC
-
-# ============================================================================
-# FIX 2: Create auth_request.conf that disables nginx-level auth
-# ============================================================================
-# auth_request is the nginx directive that triggers the subrequest to /auth.
-# By leaving this file empty, we disable auth_request globally.
-# Frigate's own auth (if enabled) will still work via /api/login.
-# ============================================================================
-
-cat > /usr/local/nginx/conf/auth_request.conf << 'AUTH_REQ'
-# Auth disabled at nginx level - Frigate 0.17.1 handles auth internally
-# via its FastAPI endpoints. Do not add "auth_request /auth;" here
-# as the /auth endpoint does not exist in Frigate 0.17.1.
-AUTH_REQ
-
-# ============================================================================
-# FIX 3: Create proxy.conf with proper settings for Frigate 0.17.1
-# ============================================================================
-
-cat > /usr/local/nginx/conf/proxy.conf << 'PROXY_CONF'
-proxy_http_version 1.1;
-proxy_cache_bypass $http_upgrade;
-proxy_buffering off;
-proxy_set_header Upgrade $http_upgrade;
-proxy_set_header Connection $http_connection;
-proxy_set_header Host $host;
-proxy_set_header X-Real-IP $remote_addr;
-proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-proxy_set_header X-Forwarded-Proto $scheme;
-proxy_set_header X-Forwarded-Host $host;
-proxy_set_header X-Forwarded-Port $server_port;
-proxy_read_timeout 86400;
-PROXY_CONF
-
-# ============================================================================
-# FIX 4: Create proxy_trusted_headers.conf for proxy auth support
-# ============================================================================
-# These are the headers that Frigate 0.17.1 accepts for upstream proxy auth.
-# Only needed if using an external auth proxy (Authelia, Authentik, etc.)
-# ============================================================================
-
-cat > /usr/local/nginx/conf/proxy_trusted_headers.conf << 'PROXY_HEADERS'
-# Headers trusted by Frigate 0.17.1 for upstream proxy authentication
-# Only used when auth.enabled: false and proxy auth is configured.
-proxy_set_header Remote-User $http_remote_user;
-proxy_set_header Remote-Groups $http_remote_groups;
-proxy_set_header Remote-Email $http_remote_email;
-proxy_set_header Remote-Name $http_remote_name;
-proxy_set_header X-Forwarded-User $http_x_forwarded_user;
-proxy_set_header X-Forwarded-Groups $http_x_forwarded_groups;
-proxy_set_header X-Forwarded-Email $http_x_forwarded_email;
-proxy_set_header X-Forwarded-Preferred-Username $http_x_forwarded_preferred_username;
-proxy_set_header X-Authentik-Username $http_x_authentik_username;
-proxy_set_header X-Authentik-Groups $http_x_authentik_groups;
-proxy_set_header X-Authentik-Email $http_x_authentik_email;
-proxy_set_header X-Authentik-Name $http_x_authentik_name;
-proxy_set_header X-Authentik-Uid $http_x_authentik_uid;
-proxy_set_header X-Proxy-Secret $http_x_proxy_secret;
-PROXY_HEADERS
-
-# ============================================================================
-# FIX 5: Create go2rtc_upstream.conf
-# ============================================================================
-
-cat > /usr/local/nginx/conf/go2rtc_upstream.conf << 'GO2RTC'
-upstream go2rtc {
- server 127.0.0.1:1984;
- keepalive 1024;
-}
-GO2RTC
+# Restore official Frigate 0.17.1 auth/proxy configs from rootfs
+for conf in auth_location.conf auth_request.conf proxy.conf proxy_trusted_headers.conf go2rtc_upstream.conf; do
+  cp "/opt/frigate/docker/main/rootfs/usr/local/nginx/conf/${conf}" "/usr/local/nginx/conf/${conf}"
+done
 
 msg_ok "Generated Nginx configuration files"
+
+
+
+
+
 
 
 
@@ -404,7 +307,7 @@ msg_info "Configuring Frigate"
 mkdir -p /config /media/frigate
 cp -r /opt/frigate/config/. /config
 
-curl_download "/media/frigate/person-bicycle-car-detection.mp4" "https://github.com/intel-iot-devkit/sample-videos/raw/master/person-bicycle-car-detection.mp4"
+# curl_download "/media/frigate/person-bicycle-car-detection.mp4" "https://github.com/intel-iot-devkit/sample-videos/raw/master/person-bicycle-car-detection.mp4"
 
 echo "tmpfs   /tmp/cache      tmpfs   defaults        0       0" >>/etc/fstab
 
@@ -432,7 +335,6 @@ mqtt:
 
 auth:
  enabled: true
- failed_login_rate_limit: "1/second;5/minute;20/hour"
 tls:
  enabled: false
  
@@ -627,6 +529,7 @@ Type=simple
 Restart=always
 RestartSec=1
 User=root
+LimitNOFILE=65535
 EnvironmentFile=/etc/frigate.env
 ExecStartPre=+rm -f /dev/shm/logs/go2rtc/current
 ExecStart=/bin/bash -c "bash /opt/frigate/docker/main/rootfs/etc/s6-overlay/s6-rc.d/go2rtc/run 2> >(/usr/bin/ts '%%Y-%%m-%%d %%H:%%M:%%.S ' >&2) | /usr/bin/ts '%%Y-%%m-%%d %%H:%%M:%%.S '"
@@ -648,6 +551,7 @@ Type=simple
 Restart=always
 RestartSec=5
 User=root
+LimitNOFILE=65535
 EnvironmentFile=/etc/frigate.env
 ExecStartPre=+rm -f /dev/shm/logs/frigate/current
 ExecStart=/bin/bash -c "bash /opt/frigate/docker/main/rootfs/etc/s6-overlay/s6-rc.d/frigate/run 2> >(/usr/bin/ts '%%Y-%%m-%%d %%H:%%M:%%.S ' >&2) | /usr/bin/ts '%%Y-%%m-%%d %%H:%%M:%%.S '"
@@ -669,6 +573,7 @@ Type=simple
 Restart=always
 RestartSec=1
 User=root
+LimitNOFILE=65535
 ExecStartPre=+rm -f /dev/shm/logs/nginx/current
 ExecStartPre=/bin/bash -c 'until curl -s http://127.0.0.1:5001/api/version >/dev/null 2>&1; do sleep 2; done'
 ExecStart=/bin/bash -c "bash /opt/frigate/docker/main/rootfs/etc/s6-overlay/s6-rc.d/nginx/run 2> >(/usr/bin/ts '%%Y-%%m-%%d %%H:%%M:%%.S ' >&2) | /usr/bin/ts '%%Y-%%m-%%d %%H:%%M:%%.S '"
