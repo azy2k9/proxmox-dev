@@ -366,7 +366,7 @@ ffmpeg:
 detectors:
   ov:
     type: openvino
-    device: GPU
+    device: CPU
 
 model:
   width: 300
