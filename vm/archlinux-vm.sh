@@ -2,9 +2,9 @@
 
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
-# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 
-source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
+
+source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/azy2k9/proxmox-dev/refs/heads/main/misc/api.func)
 
 function header_info {
   clear
@@ -552,7 +552,7 @@ DESCRIPTION=$(
   cat <<EOF
 <div align='center'>
   <a href='https://community-scripts.org' target='_blank' rel='noopener noreferrer'>
-    <img src='https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
+    <img src='https://raw.githubusercontent.com/azy2k9/proxmox-dev/refs/heads/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
   </a>
 
   <h2 style='font-size: 24px; margin: 20px 0;'>Arch Linux VM</h2>

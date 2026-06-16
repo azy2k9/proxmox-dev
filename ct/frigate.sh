@@ -2,7 +2,7 @@
 source <(curl -fsSL https://raw.githubusercontent.com/azy2k9/proxmox-dev/refs/heads/main/misc/build.func)
 # Copyright (c) 2021-2026 community-scripts ORG
 # Authors: MickLesk (CanbiZ) | Co-Author: remz1337
-# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
+
 # Source: https://frigate.video/ | Github: https://github.com/blakeblackshear/frigate
 
 APP="Frigate"
@@ -71,5 +71,5 @@ description
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
 echo -e "${INFO}${YW}Access the authenticated UI at:${CL}"
-echo -e "${GATEWAY}${BGN}http://${IP}:8971${CL}"
+echo -e "${GATEWAY}${BGN}https://${IP}:8971${CL}"
 echo -e "${INFO}${YW}Port 5000 is for internal/unauthenticated access only.${CL}"
