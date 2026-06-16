@@ -45,8 +45,17 @@ EOF
 fi
 msg_ok "Converted APT sources"
 
+msg_info "Updating APT and selecting reliable mirror"
+$STD apt update || {
+    msg_warn "Primary mirror failed, trying fallback mirror"
+    sed -i 's|deb.debian.org|cdn-fastly.deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
+    sed -i 's|security.debian.org|cdn-fastly.deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
+    $STD apt update
+}
+msg_ok "APT updated"
+
 msg_info "Installing Dependencies"
-$STD apt install -y \
+$STD apt install -y --fix-missing \
   xz-utils \
   python3 \
   python3-dev \
