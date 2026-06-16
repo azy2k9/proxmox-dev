@@ -211,18 +211,18 @@ else
   msg_warn "OpenVino build failed (CPU may not support required instructions). Frigate will use CPU model."
 fi
 
-msg_info "Installing HailoRT Runtime"
-$STD bash /opt/frigate/docker/main/install_hailort.sh
-cp -a /opt/frigate/docker/main/rootfs/. /
-sed -i '/^.*unset DEBIAN_FRONTEND.*$/d' /opt/frigate/docker/main/install_deps.sh
-echo "libedgetpu1-max libedgetpu/accepted-eula boolean true" | debconf-set-selections
-echo "libedgetpu1-max libedgetpu/install-confirm-max boolean true" | debconf-set-selections
-echo 'force-overwrite' >/etc/dpkg/dpkg.cfg.d/force-overwrite
-$STD bash /opt/frigate/docker/main/install_deps.sh
-rm -f /etc/dpkg/dpkg.cfg.d/force-overwrite
-$STD pip3 install -U /wheels/*.whl
-ldconfig
-msg_ok "Installed HailoRT Runtime"
+# msg_info "Installing HailoRT Runtime"
+# $STD bash /opt/frigate/docker/main/install_hailort.sh
+# cp -a /opt/frigate/docker/main/rootfs/. /
+# sed -i '/^.*unset DEBIAN_FRONTEND.*$/d' /opt/frigate/docker/main/install_deps.sh
+# echo "libedgetpu1-max libedgetpu/accepted-eula boolean true" | debconf-set-selections
+# echo "libedgetpu1-max libedgetpu/install-confirm-max boolean true" | debconf-set-selections
+# echo 'force-overwrite' >/etc/dpkg/dpkg.cfg.d/force-overwrite
+# $STD bash /opt/frigate/docker/main/install_deps.sh
+# rm -f /etc/dpkg/dpkg.cfg.d/force-overwrite
+# $STD pip3 install -U /wheels/*.whl
+# ldconfig
+# msg_ok "Installed HailoRT Runtime"
 
 msg_info "Installing MemryX Runtime"
 $STD bash /opt/frigate/docker/main/install_memryx.sh
@@ -241,6 +241,155 @@ rm -rf /opt/frigate/web/dist/BASE_PATH
 cp -r /opt/frigate/web/dist/* /opt/frigate/web/
 sed -i '/^s6-svc -O \.$/s/^/#/' /opt/frigate/docker/main/rootfs/etc/s6-overlay/s6-rc.d/frigate/run
 msg_ok "Built Frigate Application"
+
+
+
+
+
+
+
+
+
+# ============================================================================
+# CRITICAL FIX: Generate Nginx config files from templates
+# ============================================================================
+# The Docker rootfs copy above brings in templates, but tempio needs to 
+# process them. In Docker, s6-overlay handles this at runtime. In LXC,
+# we must do it at install time or the nginx includes will be missing/empty.
+# ============================================================================
+
+msg_info "Generating Nginx configuration files from templates"
+
+# Create config directories
+mkdir -p /usr/local/nginx/conf
+mkdir -p /usr/local/nginx/templates
+
+# Ensure templates are in place (they should be from rootfs copy, but verify)
+if [[ ! -f /usr/local/nginx/templates/listen.gotmpl ]]; then
+ cp /opt/frigate/docker/main/rootfs/usr/local/nginx/templates/*.gotmpl /usr/local/nginx/templates/ 2>/dev/null || true
+fi
+
+# Build listen.conf from template using Frigate's config
+# This reads tls.enabled and ipv6 settings from /config/config.yml
+python3 /opt/frigate/docker/main/rootfs/usr/local/nginx/get_listen_settings.py 2>/dev/null | \
+ tempio -template /usr/local/nginx/templates/listen.gotmpl \
+ -out /usr/local/nginx/conf/listen.conf 2>/dev/null || \
+ cat > /usr/local/nginx/conf/listen.conf << 'NGINX_LISTEN'
+# Internal (IPv4 always; IPv6 optional)
+listen 5000;
+
+# intended for external traffic, protected by auth
+# Default to HTTP (no TLS) for LXC internal use
+listen 8971;
+NGINX_LISTEN
+
+# Build base_path.conf from template
+python3 /opt/frigate/docker/main/rootfs/usr/local/nginx/get_base_path.py 2>/dev/null | \
+ tempio -template /usr/local/nginx/templates/base_path.gotmpl \
+ -out /usr/local/nginx/conf/base_path.conf 2>/dev/null || \
+ echo "" > /usr/local/nginx/conf/base_path.conf
+
+# ============================================================================
+# FIX 1: Create auth_location.conf that works with Frigate 0.17.1
+# ============================================================================
+# The original template proxies auth to /auth on port 5001, but Frigate 0.17.1
+# does NOT have a /auth endpoint. Instead, auth is handled internally by the
+# FastAPI app at /api/login. 
+#
+# For LXC/internal use, we disable the external auth proxy pattern and instead
+# rely on Frigate's built-in auth (when enabled) or allow unauthenticated 
+# access (when auth.enabled: false).
+#
+# The correct approach for 0.17.1: Nginx should NOT do auth_request 
+# subrequests. Instead, it should pass all requests directly to Frigate's
+# API, which handles auth itself via session cookies/JWT.
+# ============================================================================
+
+cat > /usr/local/nginx/conf/auth_location.conf << 'AUTH_LOC'
+# Frigate 0.17.1 handles authentication internally via FastAPI.
+# The old /auth endpoint no longer exists. Nginx should not attempt
+# to validate auth via subrequests. Instead, requests are passed
+# directly to Frigate which returns 401/403 as appropriate.
+#
+# This location block is kept for compatibility but does nothing.
+# If you need external proxy auth (Authelia/Authentik), configure
+# that in your external reverse proxy, not here.
+AUTH_LOC
+
+# ============================================================================
+# FIX 2: Create auth_request.conf that disables nginx-level auth
+# ============================================================================
+# auth_request is the nginx directive that triggers the subrequest to /auth.
+# By leaving this file empty, we disable auth_request globally.
+# Frigate's own auth (if enabled) will still work via /api/login.
+# ============================================================================
+
+cat > /usr/local/nginx/conf/auth_request.conf << 'AUTH_REQ'
+# Auth disabled at nginx level - Frigate 0.17.1 handles auth internally
+# via its FastAPI endpoints. Do not add "auth_request /auth;" here
+# as the /auth endpoint does not exist in Frigate 0.17.1.
+AUTH_REQ
+
+# ============================================================================
+# FIX 3: Create proxy.conf with proper settings for Frigate 0.17.1
+# ============================================================================
+
+cat > /usr/local/nginx/conf/proxy.conf << 'PROXY_CONF'
+proxy_http_version 1.1;
+proxy_cache_bypass $http_upgrade;
+proxy_buffering off;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection $http_connection;
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host $host;
+proxy_set_header X-Forwarded-Port $server_port;
+proxy_read_timeout 86400;
+PROXY_CONF
+
+# ============================================================================
+# FIX 4: Create proxy_trusted_headers.conf for proxy auth support
+# ============================================================================
+# These are the headers that Frigate 0.17.1 accepts for upstream proxy auth.
+# Only needed if using an external auth proxy (Authelia, Authentik, etc.)
+# ============================================================================
+
+cat > /usr/local/nginx/conf/proxy_trusted_headers.conf << 'PROXY_HEADERS'
+# Headers trusted by Frigate 0.17.1 for upstream proxy authentication
+# Only used when auth.enabled: false and proxy auth is configured.
+proxy_set_header Remote-User $http_remote_user;
+proxy_set_header Remote-Groups $http_remote_groups;
+proxy_set_header Remote-Email $http_remote_email;
+proxy_set_header Remote-Name $http_remote_name;
+proxy_set_header X-Forwarded-User $http_x_forwarded_user;
+proxy_set_header X-Forwarded-Groups $http_x_forwarded_groups;
+proxy_set_header X-Forwarded-Email $http_x_forwarded_email;
+proxy_set_header X-Forwarded-Preferred-Username $http_x_forwarded_preferred_username;
+proxy_set_header X-Authentik-Username $http_x_authentik_username;
+proxy_set_header X-Authentik-Groups $http_x_authentik_groups;
+proxy_set_header X-Authentik-Email $http_x_authentik_email;
+proxy_set_header X-Authentik-Name $http_x_authentik_name;
+proxy_set_header X-Authentik-Uid $http_x_authentik_uid;
+proxy_set_header X-Proxy-Secret $http_x_proxy_secret;
+PROXY_HEADERS
+
+# ============================================================================
+# FIX 5: Create go2rtc_upstream.conf
+# ============================================================================
+
+cat > /usr/local/nginx/conf/go2rtc_upstream.conf << 'GO2RTC'
+upstream go2rtc {
+ server 127.0.0.1:1984;
+ keepalive 1024;
+}
+GO2RTC
+
+msg_ok "Generated Nginx configuration files"
+
+
+
 
 msg_info "Configuring Frigate"
 mkdir -p /config /media/frigate
@@ -271,22 +420,151 @@ EOF
 cat <<EOF >/config/config.yml
 mqtt:
   enabled: false
+
+auth:
+ enabled: true
+ failed_login_rate_limit: "1/second;5/minute;20/hour"
+tls:
+ enabled: false
+ 
+telemetry:
+  stats:
+    intel_gpu_device: ''
+    # intel_gpu_device: "sriov"
+    # intel_gpu_device: "drm:/dev/dri/card1"
+
+go2rtc:
+  streams:
+    living_room: rtsp://192.168.68.61:42967/30ad76fed693f95d
+    driveway: rtsp://192.168.68.61:33885/04df7fc31d411588
+    side: rtsp://192.168.68.61:35323/dba7a13023100ee7
+    garage: rtsp://192.168.68.61:37007/354206d1cbb8d58f
+    back_garden: rtsp://192.168.68.61:39803/6295bc9a3fd77375
+    garden_entrace: rtsp://192.168.68.61:44315/5db2af6ca784f2ba
+
+ffmpeg:
+  hwaccel_args: preset-vaapi
+  # hwaccel_args: preset-intel-qsv-h264
+  output_args:
+    record: preset-record-generic-audio-aac
+
+# detectors:
+#   detector01:
+#     type: openvino
+
+detectors:
+  ov:
+    type: openvino
+    device: GPU
+
+model:
+  width: 300
+  height: 300
+  input_tensor: nhwc
+  input_pixel_format: bgr
+  path: /openvino-model/ssdlite_mobilenet_v2.xml
+  labelmap_path: /openvino-model/coco_91cl_bkgr.txt
+
+record:
+  enabled: true
+  continuous:
+    days: 30
+  alerts:
+    retain:
+      days: 30
+      mode: motion
+  detections:
+    retain:
+      days: 30
+      mode: motion
+
+detect:
+  enabled: true
+  height: 720
+  width: 1280
+  fps: 6
+
+snapshots:
+  enabled: true
+
 cameras:
-  test:
+  driveway:
+    onvif:
+      host: 192.168.68.64
+      port: 80
+      user: admin
+      password: Afiyah786
+      autotracking:
+        enabled: true
+        zooming: disabled
+        required_zones:
+          - home
+        return_preset: home
+        timeout: 5
     ffmpeg:
       inputs:
-        - path: /media/frigate/person-bicycle-car-detection.mp4
-          input_args: -re -stream_loop -1 -fflags +genpts
+        - path: rtsp://192.168.68.61:33885/04df7fc31d411588
           roles:
             - detect
+    motion:
+      mask:
+        - 0,0,0.385,0,1,0,1,0.123,1,0.382,0.717,0.3,0.718,0.245,0.678,0.203,0.679,0.161,0.534,0.124,0.423,0.1,0.336,0.11,0.23,0.123,0.137,0.141,0.058,0.229,0,0.274,0,0
+        - 0.083,0.652,0.098,0.683,0.123,0.668,0.133,0.645,0.156,0.638,0.171,0.614,0.198,0.629,0.25,0.61,0.309,0.578,0.249,0.713,0.219,0.765,0.183,0.84,0.116,1,0,1,0,0.893,0,0.769,0,0.722,0.024,0.712,0.01,0.666,0.02,0.625
+    zones:
+      home:
+        coordinates: 0.31,0.582,0.316,0.679,0.376,0.642,0.573,0.538,0.583,0.529,0.614,0.533,0.698,0.569,0.748,0.586,0.758,0.428,0.978,0.488,1,0.642,1,1,0.245,1,0.123,1,0.189,0.836,0.25,0.72
+        loitering_time: 0
+  side:
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.68.61:35323/dba7a13023100ee7
+          roles:
+            - detect
+    motion:
+      mask: 0.389,0,0.375,0.901,0.344,1,0,1,0,0,0.39,0
+    zones: {}
+    review:
+      alerts: {}
+  garage:
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.68.61:37007/354206d1cbb8d58f
+          roles:
+            - detect
+    motion:
+      mask: 0.58,0,0.593,0.068,0.575,0.447,0.571,0.508,0.577,1,0.622,1,1,1,1,0,0.582,0
+    zones: {}
+    review:
+      alerts: {}
+  living_room:
     detect:
-      height: 1080
-      width: 1920
-      fps: 5
-auth:
-  enabled: false
-detect:
-  enabled: false
+      enabled: false
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.68.61:42967/30ad76fed693f95d
+          roles:
+            - record
+  back_garden:
+    detect:
+      enabled: false
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.68.61:39803/986b3b18dd44d45d
+          roles:
+            - detect
+    zones: {}
+    review:
+      alerts: {}
+  garden_entrace:
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.68.61:44315/939a515ae97f1987
+          roles:
+            - detect
+    zones: {}
+    review:
+      alerts: {}
+version: 0.17-0
 EOF
 
 if grep -q -o -m1 -E 'avx[^ ]*|sse4_2' /proc/cpuinfo && [[ -f /openvino-model/ssdlite_mobilenet_v2.xml ]] && [[ -f /openvino-model/coco_91cl_bkgr.txt ]]; then
@@ -359,7 +637,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 Restart=always
-RestartSec=1
+RestartSec=5
 User=root
 EnvironmentFile=/etc/frigate.env
 ExecStartPre=+rm -f /dev/shm/logs/frigate/current
@@ -383,6 +661,7 @@ Restart=always
 RestartSec=1
 User=root
 ExecStartPre=+rm -f /dev/shm/logs/nginx/current
+ExecStartPre=/bin/bash -c 'until curl -s http://127.0.0.1:5001/api/version >/dev/null 2>&1; do sleep 2; done'
 ExecStart=/bin/bash -c "bash /opt/frigate/docker/main/rootfs/etc/s6-overlay/s6-rc.d/nginx/run 2> >(/usr/bin/ts '%%Y-%%m-%%d %%H:%%M:%%.S ' >&2) | /usr/bin/ts '%%Y-%%m-%%d %%H:%%M:%%.S '"
 StandardOutput=file:/dev/shm/logs/nginx/current
 StandardError=file:/dev/shm/logs/nginx/current
