@@ -36,9 +36,14 @@ function update_script() {
 start
 build_container
 
-# Attempt to add zfs cctv pool
-pct set $CTID -mp0 cctv:6000,mp=/media/frigate
-echo "mp0: cctv:subvol-${CTID}-disk-0,mp=/media/frigate,size=6000G" >> /etc/pve/lxc/${CTID}.conf    
+# After build_container, before pct set
+if zpool list | grep -q "^cctv"; then
+    pct set $CTID -mp0 cctv:6000,mp=/media/frigate
+    echo "mp0: cctv:subvol-${CTID}-disk-0,mp=/media/frigate,size=6000G" >> /etc/pve/lxc/${CTID}.conf
+    msg_ok "Mounted ZFS pool 'cctv' to /media/frigate"
+else
+    msg_warn "ZFS pool 'cctv' not found. Skipping mount point. Add storage manually via Proxmox UI."
+fi
 
 description
 
